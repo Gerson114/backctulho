@@ -20,6 +20,23 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador) *gin.Engine {
 	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
 
+	// Middleware CORS para permitir requisições do frontend
+	r.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	})
+
+
+
 	r.POST("/vote", func(c *gin.Context) {
 		var voto models.Voto
 
@@ -36,11 +53,15 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador) *gin.Engine {
 		voto.VotadoEm = time.Now().UTC()
 		voto.IPOrigem = c.ClientIP()
 
-		// 3. Verifica duplicata via Redis com TIMEOUT de 50ms
-		// Como o Redis está na nuvem (AWS), a latência pode acumular.
-		// Se demorar mais de 50ms, o context cancela e o fail-open deixa o voto passar.
-		voterID := fmt.Sprintf("%d", voto.ID)
+		// 3. Verifica duplicata via Redis
+		// A chave de segurança agora é o Número do Telefone passado no frontend
+		// Se ela enviar em branco a emenda, usamos fallback "emenda-default" para evitar bugs.
+		voterID := fmt.Sprintf("%d", voto.Numero)
 		electionID := voto.EmendaVotada
+		if electionID == "" {
+			electionID = "emenda-default"
+		}
+		
 		ctxRedis, cancel := context.WithTimeout(c.Request.Context(), 50*time.Millisecond)
 		defer cancel()
 
