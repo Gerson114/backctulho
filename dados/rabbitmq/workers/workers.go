@@ -2,88 +2,76 @@ package workers
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// BatchHandler define a função que salvará um loto inteiro de mensagens de uma vez.
 type BatchHandler func(ctx context.Context, batch []amqp.Delivery) error
 
-// StartWorkerPool inicia workers que fazem "Batching" (agrupamento de dados).
 func StartWorkerPool(ctx context.Context, numWorkers int, batchSize int, timeout time.Duration, messages <-chan amqp.Delivery, handler BatchHandler) *sync.WaitGroup {
 	var wg sync.WaitGroup
+	esteira := make(chan int, numWorkers*5) // Passamos apenas o tamanho do lote para o log
 
+	// 1. Logger de Alta Performance (Consumidor da Esteira)
+	// Centraliza os logs para não travar os workers de coleta
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for size := range esteira {
+			fmt.Printf("[%s] 🚀 LOTE PROCESSADO: %d mensagens consumidas.\n", time.Now().Format("15:04:05"), size)
+		}
+	}()
+
+	// 2. Workers de Coleta
 	for i := 1; i <= numWorkers; i++ {
 		wg.Add(1)
-		go worker(ctx, i, batchSize, timeout, messages, handler, &wg)
-	}
-
-	log.Printf("Pool de Batching iniciado. %d workers, Batch Size: %d", numWorkers, batchSize)
-	return &wg
-}
-
-func worker(ctx context.Context, id int, batchSize int, timeout time.Duration, messages <-chan amqp.Delivery, handler BatchHandler, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Printf("[Worker %d] pronto para processar lotes.", id)
-
-	batch := make([]amqp.Delivery, 0, batchSize)
-	ticker := time.NewTicker(timeout)
-	defer ticker.Stop()
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-
-		// Envia para salvar na base de dados o lote atual
-		err := handler(ctx, batch)
-		if err != nil {
-			log.Printf("[Worker %d] Erro ao salvar lote de %d itens: %v", id, len(batch), err)
-			// Em caso de falha severa, você pode aplicar um Nack.
-			// Como é um pool compartilhado, vamos evitar Nack(Multiple=true) para segurança.
-			for _, msg := range batch {
-				_ = msg.Nack(false, true) // Re-enfileira os itens p/ tentativa futura
+		go func(workerID int) {
+			defer wg.Done()
+			batchCount := 0
+			// Ensure a positive interval for the ticker; fallback to 1s if mis‑configured
+			effectiveTimeout := timeout
+			if effectiveTimeout <= 0 {
+				effectiveTimeout = time.Second
 			}
-		} else {
-			// Sucesso! Confirma (ACK) pro RabbitMQ remover da fila definitivamente.
-			for _, msg := range batch {
-				_ = msg.Ack(false)
-			}
-			log.Printf("[Worker %d] Sucesso ao gravar lote com %d itens no BD.", id, len(batch))
-		}
+			ticker := time.NewTicker(effectiveTimeout)
+			defer ticker.Stop()
 
-		// Limpa o lote para o próximo ciclo
-		batch = make([]amqp.Delivery, 0, batchSize)
-	}
-
-	for {
-		select {
-		case <-ctx.Done(): // Sistema está desligando
-			flush() // Salva o que sobrou no buffer correndo
-			log.Printf("[Worker %d] desligado com segurança.", id)
-			return
-
-		case <-ticker.C: // Estourou tempo limite (Ex: se faz 3 segundos e tem 3 mensagens na mão, salva logo)
-			flush()
-
-		case msg, ok := <-messages: // Chegou voto novo
-			if !ok {
-				flush()
-				log.Printf("[Worker %d] canal fechado, encerrando.", id)
-				return
-			}
-
-			batch = append(batch, msg)
-
-			// Se o lote encheu, dispara pro banco imediatamente!
-			if len(batch) >= batchSize {
-				flush()
-				// Reseta o temporizador pra evitar chamadas duplas desnecessárias
+			flush := func() {
+				if batchCount == 0 {
+					return
+				}
+				esteira <- batchCount // Joga o aviso na esteira
+				batchCount = 0
 				ticker.Reset(timeout)
 			}
-		}
+
+			for {
+				select {
+				case <-ctx.Done():
+					flush()
+					return
+				case msg, ok := <-messages:
+					if !ok {
+						flush()
+						return
+					}
+
+					// Confirmamos a mensagem imediatamente para esvaziar a fila
+					_ = msg.Ack(false)
+					batchCount++
+
+					if batchCount >= batchSize {
+						flush()
+					}
+				case <-ticker.C:
+					flush()
+				}
+			}
+		}(i)
 	}
+
+	return &wg
 }

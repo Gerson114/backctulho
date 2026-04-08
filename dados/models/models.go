@@ -2,7 +2,6 @@ package models
 
 import "time"
 
-// Voto representa o payload publicado no RabbitMQ.
 type Voto struct {
 	ID           int64     `json:"id"`
 	Nome         string    `json:"nome"`

@@ -32,10 +32,12 @@ func Run(cfg config.AppConfig) error {
 	defer ch.Close()
 
 	// 3. Inicializaçao do Consumer e Worker Pool mapeando para o Handler isolado
+	// 3. Inicializaçao do Consumer e Worker Pool mapeando para o Handler isolado
 	wg, err := consumer.StartConsumer(
 		ctx,
 		ch,
 		cfg.QueueName,
+		cfg.PrefetchCount,
 		cfg.NumWorkers,
 		cfg.BatchSize,
 		cfg.Timeout,

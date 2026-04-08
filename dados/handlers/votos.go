@@ -2,23 +2,30 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"nome-do-projeto/models"
 )
 
-// ProcessVoteBatch é o manipulador responsável por pegar os lotes do RabbitMQ
-// e dispará-los para o banco de dados (ex: Postgres Aurora)
+// ProcessVoteBatch logs the received votes instead of persisting them.
 func ProcessVoteBatch(ctx context.Context, batch []amqp.Delivery) error {
-	log.Printf("[Processamento] Recebido lote de %d votos.", len(batch))
-
-	for i, msg := range batch {
-		// Logando o conteúdo de cada mensagem (voto) no terminal
-		log.Printf("[Voto %d] Conteúdo: %s", i+1, string(msg.Body))
+	var votos []models.Voto
+	for _, msg := range batch {
+		var v models.Voto
+		if err := json.Unmarshal(msg.Body, &v); err != nil {
+			log.Printf("[handlers] erro ao fazer Unmarshal da mensagem: %v", err)
+			continue
+		}
+		votos = append(votos, v)
 	}
 
-	log.Printf("[Processamento] Finalizado o log de %d votos. Enviando ACK para o RabbitMQ...", len(batch))
+	if len(votos) == 0 {
+		log.Println("[handlers] lote vazio, nada a registrar.")
+		return nil
+	}
 
-	// Quando esta função retorna nil (sem erro), o Worker envia o Ack para o RabbitMQ
+	log.Printf("[handlers] lote de %d votos recebido. Primeiro voto: %+v", len(votos), votos[0])
 	return nil
 }

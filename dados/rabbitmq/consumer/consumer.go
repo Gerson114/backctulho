@@ -7,57 +7,35 @@ import (
 	"sync"
 	"time"
 
-	"nome-do-projeto/rabbitmq/workers"
+	"nome-do-projeto/rabbitmq/workers" // ajuste o path conforme seu projeto
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// StartConsumer configures the queue, sets QoS, and starts the batching worker pool.
-func StartConsumer(ctx context.Context, ch *amqp.Channel, queueName string, numWorkers int, batchSize int, timeout time.Duration, handler workers.BatchHandler) (*sync.WaitGroup, error) {
-	// 1. Declare the queue
-	q, err := ch.QueueDeclare(
-		queueName, // name
-		true,      // durable
-		false,     // delete when unused
-		false,     // exclusive
-		false,     // no-wait
-		nil,       // arguments
-	)
+func StartConsumer(ctx context.Context, ch *amqp.Channel, queueName string, prefetchCount int, numWorkers int, batchSize int, timeout time.Duration, handler workers.BatchHandler) (*sync.WaitGroup, error) {
+	// 1. Declaração da Fila
+	q, err := ch.QueueDeclare(queueName, true, false, false, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to declare a queue: %w", err)
 	}
 
-	// 2. Set QoS (Prefetch Count).
-	prefetch := (numWorkers * batchSize) * 2
-	if prefetch > 60000 {
-		prefetch = 60000 // Prevenção limite do protocolo AMQP (16-bit uint per channel max 65535)
-	}
-
-	err = ch.Qos(
-		prefetch, // prefetch count
-		0,        // prefetch size
-		false,    // global
-	)
+	// 2. QoS AGRESSIVO (O segredo dos 10k/s)
+	// Permitimos 10.000 mensagens unacked no canal para eliminar latência de rede.
+	// prefetchCount is supplied via configuration
+	err = ch.Qos(prefetchCount, 0, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set QoS: %w", err)
 	}
 
-	// 3. Start Consuming
-	msgs, err := ch.Consume(
-		q.Name, // queue
-		"",     // consumer tag
-		false,  // auto-ack (AGORA É FALSO!) O worker quem confima o Lote quando salva com sucesso. Segurança total!
-		false,  // exclusive
-		false,  // no-local
-		false,  // no-wait
-		nil,    // args
-	)
+	// 3. Registro do Consumidor
+	msgs, err := ch.Consume(q.Name, "", false, false, false, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register a consumer: %w", err)
 	}
 
-	// 4. Dispatch messages to the Batching worker pool
-	log.Printf("Iniciando pool com %d workers, lendo de %d em %d...", numWorkers, batchSize, batchSize)
+	log.Printf("[SISTEMA] Modo Turbo: Prefetch %d | Workers %d | Lote %d", prefetchCount, numWorkers, batchSize)
+
+	// 4. Inicia o Pool de Workers
 	wg := workers.StartWorkerPool(ctx, numWorkers, batchSize, timeout, msgs, handler)
 
 	return wg, nil

@@ -11,11 +11,13 @@ import (
 
 // AppConfig armazena os parâmetros de inicialização
 type AppConfig struct {
-	RabbitURL  string
-	QueueName  string
-	NumWorkers int
-	BatchSize  int
-	Timeout    time.Duration
+	RabbitURL    string
+	QueueName    string
+	NumWorkers   int
+	BatchSize    int
+	Timeout      time.Duration
+	DBDSN        string // PostgreSQL DSN
+	PrefetchCount int   // number of messages to prefetch from RabbitMQ
 }
 
 // LoadConfig carrega as variáveis do arquivo .env e ambiente
@@ -31,7 +33,9 @@ func LoadConfig() AppConfig {
 		QueueName:  getEnv("QUEUE_NAME", "minha_fila"),
 		NumWorkers: getEnvAsInt("NUM_WORKERS", 20),
 		BatchSize:  getEnvAsInt("BATCH_SIZE", 500),
-		Timeout:    getEnvAsDuration("BATCH_TIMEOUT", 1*time.Second),
+		Timeout:    getEnvAsDuration("BATCH_TIMEOUT", 500*time.Millisecond),
+		PrefetchCount: getEnvAsInt("PREFETCH_COUNT", 20000),
+		DBDSN:      getEnv("POSTGRES_DSN", "postgres://user:pass@localhost:5432/dbname?sslmode=disable"),
 	}
 }
 

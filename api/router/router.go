@@ -35,8 +35,6 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador) *gin.Engine {
 		c.Next()
 	})
 
-
-
 	r.POST("/vote", func(c *gin.Context) {
 		var voto models.Voto
 
@@ -61,7 +59,7 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador) *gin.Engine {
 		if electionID == "" {
 			electionID = "emenda-default"
 		}
-		
+
 		ctxRedis, cancel := context.WithTimeout(c.Request.Context(), 50*time.Millisecond)
 		defer cancel()
 
