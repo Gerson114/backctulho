@@ -40,7 +40,8 @@ func Init(dsn string) (*gorm.DB, error) {
 	sqlDB.SetMaxOpenConns(100)
 
 	// Máximo de conexões inativas no pool esperando trabalho
-	sqlDB.SetMaxIdleConns(10)
+	// Aumentado para 50 para suportar a alta concorrência de 60+ workers
+	sqlDB.SetMaxIdleConns(50)
 
 	// Tempo máximo que uma conexão pode ser reutilizada
 	sqlDB.SetConnMaxLifetime(time.Hour)

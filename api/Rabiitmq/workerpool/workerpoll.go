@@ -41,8 +41,6 @@ func (wp *WorkerPool) iniciar() {
 }
 
 // Publicar é chamado pela API para cada voto recebido.
-// Retorna em nanosegundos — não espera o RabbitMQ confirmar.
-// Se a fila interna estiver cheia, aplica back-pressure retornando erro.
 func (wp *WorkerPool) Publicar(voto models.Voto) error {
 	select {
 	case wp.fila <- voto:
@@ -50,4 +48,18 @@ func (wp *WorkerPool) Publicar(voto models.Voto) error {
 	default:
 		return fmt.Errorf("workerpool: fila cheia, sistema sobrecarregado")
 	}
+}
+
+// EstaSobrecarregado retorna true se a fila interna estiver com mais de 90% de ocupação.
+// Útil para o Health Check de produção sinalizar ao Load Balancer para reduzir o tráfego.
+func (wp *WorkerPool) EstaSobrecarregado() bool {
+	capacidade := cap(wp.fila)
+	uso := len(wp.fila)
+
+	if capacidade == 0 {
+		return false
+	}
+
+	// Alerta quando atingir 90% da capacidade do buffer interno
+	return float64(uso)/float64(capacidade) > 0.9
 }

@@ -2,22 +2,18 @@ package conexao
 
 import (
 	"log"
-	"os"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // ConexaoRabbitmq abre e retorna apenas a Connection.
-// Os canais são criados pelo WorkerPool — um por goroutine.
-// URL lida da variável de ambiente RABBITMQ_URL.
-func ConexaoRabbitmq() *amqp.Connection {
-	url := os.Getenv("RABBITMQ_URL")
-
+// URL passada via parâmetro para garantir controle centralizado (Produção).
+func ConexaoRabbitmq(url string) *amqp.Connection {
 	conn, err := amqp.Dial(url)
 	if err != nil {
-		log.Fatalf("RabbitMQ: erro ao conectar: %s", err)
+		log.Fatalf("❌ RabbitMQ: falha crítica ao conectar: %s", err)
 	}
 
-	log.Println("RabbitMQ: conectado com sucesso")
+	log.Println("✅ RabbitMQ: conexão de produção estabelecida")
 	return conn
 }

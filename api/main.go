@@ -6,57 +6,57 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/joho/godotenv"
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
 	"meu-projeto/Rabiitmq/conexao"
 	"meu-projeto/Rabiitmq/workerpool"
+	"meu-projeto/config"
 	"meu-projeto/router"
 	"meu-projeto/validacao"
 )
 
 func main() {
-	// Carrega variáveis do .env (só em dev — em produção usa env vars reais)
-	if err := godotenv.Load(); err != nil {
-		log.Println("Arquivo .env não encontrado, usando variáveis de ambiente do sistema")
+	// 1. Carrega Configurações (Centralizado e validado para Produção)
+	cfg := config.LoadConfig()
+
+	// Configura Modo de Produção do Gin
+	if cfg.GinMode == "release" {
+		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// 1. Conecta ao RabbitMQ (URL via RABBITMQ_URL env var)
-	conn := conexao.ConexaoRabbitmq()
+	// 2. Conecta ao RabbitMQ (Usa a URL do ambiente sem fallback local)
+	conn := conexao.ConexaoRabbitmq(cfg.RabbitURL)
 	defer conn.Close()
 
-	// 2. Inicia 20 workers — cada um com seu canal RabbitMQ próprio
-	wp := workerpool.Novo(conn, 20, 10_000)
+	// 3. Inicia Pool de Workers Internos (Producer)
+	wp := workerpool.Novo(conn, 30, 10_000)
 
-	// 3. Conecta ao Redis (anti-duplicata) via URL
-	redisUrl := os.Getenv("REDIS_URL")
-	if redisUrl == "" {
-		redisUrl = "redis://localhost:6379"
-	}
-	opts, err := redis.ParseURL(redisUrl)
+	// 4. Conecta ao Redis com Pool otimizado
+	opts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		log.Fatalf("Erro ao configurar Redis URL: %s", err)
+		log.Fatalf("❌ Erro fatal: falha ao parsear REDIS_URL: %v", err)
 	}
+
+	opts.PoolSize = 100
+	opts.MinIdleConns = 20
+
 	rdb := redis.NewClient(opts)
 	val := validacao.Novo(rdb)
 
-	// 4. Sobe o servidor HTTP em goroutine separada
-	r := router.Iniciar(wp, val) // Passa o workerpool e o validador
-	porta := os.Getenv("PORT")
-	if porta == "" {
-		porta = "8080"
-	}
+	// 5. Inicia o Servidor HTTP (Gin)
+	r := router.Iniciar(wp, val, cfg)
 
 	go func() {
-		log.Printf("API rodando em :%s", porta)
-		if err := r.Run(":" + porta); err != nil {
-			log.Fatalf("erro ao iniciar servidor: %s", err)
+		log.Printf("🚀 SERVIDOR EM PRODUÇÃO | Porta: %s | Modo: %s", cfg.Port, cfg.GinMode)
+		if err := r.Run(":" + cfg.Port); err != nil {
+			log.Fatalf("❌ Erro fatal no servidor: %v", err)
 		}
 	}()
 
-	// 5. Graceful shutdown — aguarda Ctrl+C ou SIGTERM
+	// Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Println("Sinal recebido, encerrando servidor...")
+	log.Println("🛑 Sinal de encerramento recebido. Finalizando serviços...")
 }

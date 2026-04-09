@@ -1,320 +1,106 @@
-# 🗳️ vote-api — Documentação do Microserviço
+# 🛡️ Vote API — O Produtor de Alta Performance e Seguro
 
-> **Capacidade alvo:** 2.000 votos/segundo · **Stack:** Go · RabbitMQ · Redis
-
----
-
-## 📐 Arquitetura Geral
-
-```
-Eleitor (HTTP)
-    │  POST /vote
-    ▼
-┌──────────────────────────────────────────┐
-│              vote-api                     │
-│                                          │
-│  1. Validação do Body (Gin)              │
-│          ↓                               │
-│  2. Anti-duplicata (Redis SET NX)        │
-│          ↓                               │
-│  3. WorkerPool.Publicar(voto)            │
-│     ┌────┴────┐                          │
-│     │ chan Go  │ ← fila interna (10.000) │
-│     └─┬──┬──┬─┘                          │
-│       │  │  │                            │
-│     W0  W1 ... W19  ← 20 goroutines     │
-│     ch0 ch1    ch19 ← canal próprio cada │
-│       │  │  │                            │
-│       └──┴──┘                            │
-│          ↓                               │
-│     RabbitMQ (fila "votos")              │
-│                                          │
-│  4. Responde 202 Accepted               │
-└──────────────────────────────────────────┘
-```
+> **Capacidade Alvo:** 5.000+ votos/segundo  
+> **Stack:** Go 1.25 · Redis (Cache L1/L2) · RabbitMQ (Worker Pool) · Gin Framework
 
 ---
 
-## 📁 Estrutura de Pastas
+## 📐 Arquitetura e Escudo de Segurança
 
-```
-micro/api/
-├── main.go                         ← ponto de entrada
-├── models/
-│   └── models.go                   ← struct Voto
-├── validacao/
-│   └── validacao.go                ← anti-duplicata (Redis SET NX)
-└── Rabiitmq/
-    ├── conexao/
-    │   └── conexao.go              ← abre Connection com o broker
-    ├── producer/
-    │   └── producer.go             ← producer simples (canal único)
-    └── workerpool/
-        ├── workerpoll.go           ← struct WorkerPool, Novo(), Publicar()
-        └── worker.go               ← goroutine com canal próprio
+Este serviço atua como o ponto de entrada e o escudo principal do ecossistema de votação. Foi projetado para lidar com tráfego extremo enquanto protege o sistema contra duplicatas e ataques de inundação maliciosos (bots).
+
+### O Pipeline de Ingestão de Votos:
+1.  **CORS e Recuperação**: Restrição de domínio estrita e recuperação automática de falhas.
+2.  **Rate Limiting por IP**: Limitador de janela fixa baseado em Redis (previne ataques de bots).
+3.  **Validação JSON**: Mapeamento estrito do corpo da requisição com checagem de tipos.
+4.  **Validação de Telefone**: Rejeita números malformados ou incompletos (< 8 dígitos).
+5.  **Desduplicação (Camada Dupla)**:
+    *   **L1 (Memória Local)**: Checagem instantânea na RAM local do servidor (< 1ms).
+    *   **L2 (Redis)**: Checagem global distribuída via operação atômica `SETNX`.
+6.  **Publicação Assíncrona**: O voto é enviado para um Pool de Workers interno e imediatamente confirmado para o usuário.
+
+---
+
+## 📁 Estrutura do Projeto
+
+```text
+api/
+├── config/              # Configuração centralizada de produção (Estrita)
+├── Rabiitmq/            #
+│   ├── conexao/         # Gerenciamento de conexão TCP/TLS RabbitMQ
+│   └── workerpool/      # Pool de produtores multithread (Buffer Interno)
+├── router/              # Motor Gin, Rotas, Middlewares e Lógica de Segurança
+├── validacao/           # O "Cérebro": Cache L1, Checagem Redis, Rate Limiting
+├── models/              # Contratos de dados compartilhados
+└── Dockerfile           # Build de produção multi-stage (Alpine Minimalista)
 ```
 
 ---
 
-## 📦 Detalhamento de Cada Pacote
+## ⚙️ Configuração (Variáveis de Ambiente)
+
+Este serviço **falha imediatamente** se as variáveis críticas de produção estiverem ausentes.
+
+| Variável | Obrigatoriedade | Descrição |
+| :--- | :--- | :--- |
+| `RABBITMQ_URL` | **Obrigatório** | `amqps://usuario:senha@host:porta/vhost` |
+| `REDIS_URL` | **Obrigatório** | `redis://usuario:senha@host:porta` |
+| `PORT` | Opcional | Porta da API (Padrão: `8080`) |
+| `GIN_MODE` | Opcional | Use `release` para produção (Padrão: `release`) |
+| `ALLOWED_ORIGIN` | Opcional | Restrição CORS (ex: `https://voto.com`). Padrão: `*` |
 
 ---
 
-### 1. `models/models.go`
+## 🚀 Endpoints da API
 
-Define a estrutura de dados do voto que trafega pelo sistema.
+### 1. Enviar Voto
+`POST /vote`
 
-```go
-type Voto struct {
-    ID           int64  `json:"id"`
-    Nome         string `json:"nome"`
-    Numero       int    `json:"numero"`
-    EmendaVotada string `json:"emenda_votada"`
+**Corpo da Requisição:**
+```json
+{
+  "nome": "João Silva",
+  "numero": 12345678,
+  "emenda_votada": "Emenda 01"
 }
 ```
 
-| Campo | Tipo | Descrição |
-|---|---|---|
-| `ID` | `int64` | Identificador único do voto |
-| `Nome` | `string` | Nome do candidato ou referência |
-| `Numero` | `int` | Número do candidato |
-| `EmendaVotada` | `string` | Emenda escolhida pelo eleitor |
+**Respostas:**
+*   `202 Accepted`: Voto recebido e enfileirado para processamento.
+*   `400 Bad Request`: JSON inválido ou número de telefone muito curto.
+*   `409 Conflict`: Voto duplicado detectado (já votou).
+*   `429 Too Many Requests`: Limite de requisições por IP excedido (Proteção contra Bot).
+*   `503 Service Unavailable`: Buffer interno cheio (Sobrecarga do Sistema).
+
+### 2. Monitoramento de Saúde
+`GET /health`
+
+Fornece o status em tempo real das dependências críticas. Útil para Health Checks de Load Balancers (AWS/GCP/K8s).
+*   **Verificações**: Conectividade com Redis, Saturação do Pool de Workers.
 
 ---
 
-### 2. `Rabiitmq/conexao/conexao.go`
+## ⚡ Recursos de Performance
 
-**Responsabilidade:** Abrir a conexão TCP com o broker RabbitMQ.
+### 1. Desduplicação em Camada Dupla
+Para atingir 5 mil votos/s, não podemos consultar o Redis para cada duplicata. 
+- **L1 (sync.Map)**: Armazena IDs vistos recentemente na memória local.
+- **L2 (Redis)**: Garante a unicidade global entre todas as instâncias da API.
 
-```
-amqp.Dial(url) → *amqp.Connection
-```
-
-**Detalhes importantes:**
-- Retorna **apenas** a `*amqp.Connection` (thread-safe)
-- **Não** cria canais — os canais são criados pelo WorkerPool
-- Se a conexão falhar, encerra o programa com `log.Fatalf`
-- A URL aponta para o CloudAMQP (ambiente dev)
-
-**Fluxo interno:**
-```
-ConexaoRabbitmq()
-   │
-   ├── amqp.Dial("amqps://...") → abre conexão TCP/TLS
-   │       ↓
-   ├── Se erro → log.Fatal (mata o programa)
-   │       ↓
-   └── return conn ✅
-```
+### 2. Pool de Workers Interno
+Em vez de abrir um canal AMQP para cada requisição, a API usa um pool pré-alocado de **30 workers**. Cada worker tem seu próprio canal AMQP exclusivo, evitando problemas de concorrência e overhead de rede.
 
 ---
 
-### 3. `validacao/validacao.go`
+## 🛠️ Desenvolvimento e Deploy
 
-**Responsabilidade:** Garantir que um eleitor não vote duas vezes na mesma eleição.
-
-**Mecanismo:** Redis `SET NX` (Set if Not eXists) — operação atômica, < 1ms.
-
-```
-Chave:  vote:{voterID}:election:{electionID}
-Valor:  "1"
-TTL:    7 dias (604.800 segundos)
-```
-
-**Fluxo interno:**
-```
-JaVotou(ctx, voterID, electionID)
-   │
-   ├── Redis SET NX chave "1" EX 604800
-   │       ↓
-   ├── Redis criou a chave? (primeira vez)
-   │   ├── SIM → return nil (pode votar ✅)
-   │   └── NÃO → return ErrVotoDuplicado ❌
-   │       ↓
-   └── Redis fora do ar? → return erro ⚠️
-```
-
-**Por que Redis e não banco de dados?**
-- Redis: 100.000+ ops/segundo (responde em < 1ms)
-- PostgreSQL: ~5.000 ops/segundo (responde em ~5ms)
-- Para 2.000 req/s, Redis é 50x mais rápido
-
-**Thread-safe:** `redis.Client` é seguro para uso concorrente — pode ser compartilhado entre goroutines.
-
----
-
-### 4. `Rabiitmq/workerpool/workerpoll.go`
-
-**Responsabilidade:** Gerenciar N goroutines que publicam votos no RabbitMQ em paralelo.
-
-**Por que existe?**
-`amqp.Channel` **não é thread-safe**. Se 2.000 requisições usarem o mesmo canal simultaneamente, o programa trava. O WorkerPool resolve isso dando **um canal exclusivo** para cada goroutine.
-
-**Struct:**
-```go
-type WorkerPool struct {
-    conn    *amqp.Connection  // thread-safe, compartilhada
-    fila    chan models.Voto  // fila interna (buffer em memória)
-    workers int               // quantidade de goroutines
-}
-```
-
-**Funções:**
-
-| Função | O que faz |
-|---|---|
-| `Novo(conn, 20, 10000)` | Cria o pool e dispara 20 goroutines |
-| `iniciar()` | Loop que cria as goroutines com `go wp.worker(i)` |
-| `Publicar(voto)` | API joga o voto na fila interna (~nanosegundos) |
-
-**Back-pressure (Publicar):**
-```go
-select {
-case wp.fila <- voto:  // enfileira e retorna
-    return nil
-default:               // fila cheia → rejeita imediatamente
-    return fmt.Errorf("sistema sobrecarregado")
-}
-```
-Isso impede que a API trave sob carga extrema — se a fila interna estiver cheia, responde 503 instantaneamente.
-
----
-
-### 5. `Rabiitmq/workerpool/worker.go`
-
-**Responsabilidade:** Cada goroutine abre seu canal RabbitMQ exclusivo e processa votos da fila interna.
-
-**Fluxo de cada worker:**
-```
-worker(id)
-   │
-   ├── 1. Abre canal próprio: wp.conn.Channel()
-   │      (canal exclusivo, sem concorrência)
-   │
-   ├── 2. Declara fila "votos" (idempotente)
-   │      durable=true → sobrevive a restart
-   │
-   └── 3. Loop eterno:
-          for voto := range wp.fila {
-              json.Marshal(voto)
-              canal.PublishWithContext(...)
-          }
-          ↑
-          Bloqueia quando fila está vazia (zero CPU)
-          Acorda quando um voto chega
-```
-
-**Detalhes da publicação:**
-```go
-amqp.Publishing{
-    ContentType:  "application/json",
-    DeliveryMode: amqp.Persistent,   // sobrevive ao restart do RabbitMQ
-    Body:         corpo,             // voto serializado em JSON
-}
-```
-
-**Se ocorrer erro:**
-- Erro ao serializar → loga e descarta o voto (`continue`)
-- Erro ao publicar → loga mas continua processando
-
----
-
-### 6. `Rabiitmq/producer/producer.go`
-
-**Responsabilidade:** Producer simples que usa um canal único compartilhado.
-
-> ⚠️ **Este pacote existe para referência/testes.** Em produção, use o `workerpool` — o producer simples tem race condition com múltiplas goroutines.
-
-| Diferença | `producer` | `workerpool` |
-|---|---|---|
-| Canais | 1 compartilhado | 1 por goroutine |
-| Thread-safe | ❌ | ✅ |
-| Throughput | ~500/s | ~5.000/s |
-| Uso | Testes | Produção |
-
----
-
-## 🔄 Fluxo Completo (Passo a Passo)
-
-```
-1. Eleitor envia POST /vote com JSON:
-   { "id": 1, "nome": "João", "numero": 10, "emenda_votada": "E1" }
-
-2. main.go recebeu a requisição
-       ↓
-3. validacao.JaVotou(voterID, electionID)
-   └── Redis SET NX → chave existe?
-       ├── SIM → 409 Conflict "já votou" ← para aqui
-       └── NÃO → continua ↓
-
-4. workerpool.Publicar(voto)
-   └── wp.fila <- voto (coloca na fila interna)
-       ├── Fila cheia → 503 Service Unavailable ← para aqui
-       └── Enfileirou → continua ↓
-
-5. Responde 202 Accepted ao eleitor ← API termina aqui
-
-6. [Em background] Worker acorda
-   └── pega voto da wp.fila
-       └── json.Marshal(voto)
-           └── canal.PublishWithContext(...)
-               └── mensagem chega na fila "votos" do RabbitMQ ✅
-```
-
----
-
-## ⚡ Capacidade de Cada Componente
-
-```
-Componente            Capacidade       Meta (2.000/s)    Status
-────────────────────  ───────────────  ────────────────  ──────
-Redis SET NX          100.000+ ops/s   2.000 ops/s       ✅
-WorkerPool (20)        ~5.000 pub/s    2.000 pub/s       ✅
-Gin HTTP               30.000+ req/s   2.000 req/s       ✅
-CloudAMQP (free)          ~1 msg/s     2.000 msg/s       ❌
-RabbitMQ (cluster)    50.000+ msg/s    2.000 msg/s       ✅
-```
-
-> ⚠️ **O CloudAMQP gratuito é apenas para desenvolvimento.**
-> Em produção, use um RabbitMQ Cluster próprio ou plano pago.
-
----
-
-## 🚨 Pontos Críticos e Mitigações
-
-| Risco | Impacto | Mitigação |
-|---|---|---|
-| Redis cai | Duplicatas passam | Redis Sentinel/Cluster + fallback PostgreSQL |
-| RabbitMQ cai | Votos na fila interna se perdem | `amqp.Persistent` + DLQ + retry |
-| WorkerPool cheio | 503 para o eleitor | Aumentar `buffer` (10.000 → 50.000) |
-| Canal do worker morre | Worker para de publicar | Recriar canal automaticamente |
-| Pico acima de 5.000/s | Fila interna cresce | Mais workers (20 → 50) |
-
----
-
-## 🏃 Como Executar
-
+### Rodar Localmente (para testes)
 ```bash
-cd micro/api
-
-# Instalar dependências
 go mod tidy
-
-# Rodar
-go run .
-# Output: "RabbitMQ: conectado com sucesso"
-#         "worker 0 pronto para receber votos"
-#         ...
-#         "worker 19 pronto para receber votos"
+SUBSTITUA_VARIAVEIS_AQUI go run main.go
 ```
 
----
-
-## 📚 Dependências
-
-| Pacote | Versão | Uso |
-|---|---|---|
-| `github.com/rabbitmq/amqp091-go` | v1.10.0 | Cliente AMQP para RabbitMQ |
-| `github.com/redis/go-redis/v9` | v9.18.0 | Cliente Redis (anti-duplicata) |
-| `github.com/gin-gonic/gin` | v1.12.0 | Framework HTTP |
-| `github.com/google/uuid` | v1.6.0 | Geração de UUIDs |
+### Build da Imagem de Produção
+```bash
+docker build -t vote-api .
+```

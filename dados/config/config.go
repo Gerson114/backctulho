@@ -9,39 +9,50 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// AppConfig armazena os parâmetros de inicialização
 type AppConfig struct {
-	RabbitURL    string
-	QueueName    string
-	NumWorkers   int
-	BatchSize    int
-	Timeout      time.Duration
-	DBDSN        string // PostgreSQL DSN
-	PrefetchCount int   // number of messages to prefetch from RabbitMQ
+	RabbitURL     string
+	QueueName     string
+	NumCollectors int
+	NumProcessors int
+	BatchSize     int
+	Timeout       time.Duration
+	DBDSName      string
+	PrefetchCount int
 }
 
-// LoadConfig carrega as variáveis do arquivo .env e ambiente
 func LoadConfig() AppConfig {
-	// Carrega o arquivo .env se ele existir
-	err := godotenv.Load()
+	// Força o carregamento do .env do diretório atual
+	err := godotenv.Load(".env")
 	if err != nil {
-		log.Println("[Aviso] Arquivo .env não encontrado, usando variáveis de ambiente.")
+		log.Printf("[Config] ⚠️  Aviso: Erro ao carregar .env: %v. Usando env vars do sistema.", err)
+	} else {
+		log.Println("[Config] ✅ Arquivo .env carregado com sucesso.")
 	}
 
-	return AppConfig{
-		RabbitURL:  getEnv("RABBITMQ_URL", "amqp://guest:guest@127.0.0.1:5672/"),
-		QueueName:  getEnv("QUEUE_NAME", "minha_fila"),
-		NumWorkers: getEnvAsInt("NUM_WORKERS", 20),
-		BatchSize:  getEnvAsInt("BATCH_SIZE", 500),
-		Timeout:    getEnvAsDuration("BATCH_TIMEOUT", 500*time.Millisecond),
-		PrefetchCount: getEnvAsInt("PREFETCH_COUNT", 20000),
-		DBDSN:      getEnv("POSTGRES_DSN", "postgres://user:pass@localhost:5432/dbname?sslmode=disable"),
+	cfg := AppConfig{
+		RabbitURL:     getEnv("RABBITMQ_URL", ""),
+		QueueName:     getEnv("QUEUE_NAME", "votos"),
+		NumCollectors: getEnvAsInt("NUM_COLLECTORS", 3),
+		NumProcessors: getEnvAsInt("NUM_PROCESSORS", 60),
+		BatchSize:     getEnvAsInt("BATCH_SIZE", 1000),
+		Timeout:       getEnvAsDuration("BATCH_TIMEOUT", 200*time.Millisecond),
+		PrefetchCount: getEnvAsInt("PREFETCH_COUNT", 10000),
+		DBDSName:      getEnv("POSTGRES_DSN", ""),
 	}
+
+	// Validação de Produção
+	if cfg.RabbitURL == "" {
+		log.Fatal("❌ ERRO: RABBITMQ_URL de produção não definida nos dados.")
+	}
+	if cfg.DBDSName == "" {
+		log.Fatal("❌ ERRO: POSTGRES_DSN de produção não definida nos dados.")
+	}
+
+	return cfg
 }
 
-// funçôes auxiliares para facilitar a leitura profissional
 func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
 		return value
 	}
 	return fallback
@@ -57,8 +68,8 @@ func getEnvAsInt(key string, fallback int) int {
 
 func getEnvAsDuration(key string, fallback time.Duration) time.Duration {
 	valueStr := getEnv(key, "")
-	if value, err := time.ParseDuration(valueStr); err == nil {
-		return value
+	if d, err := time.ParseDuration(valueStr); err == nil {
+		return d
 	}
 	return fallback
 }

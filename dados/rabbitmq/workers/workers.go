@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -11,40 +12,59 @@ import (
 
 type BatchHandler func(ctx context.Context, batch []amqp.Delivery) error
 
-func StartWorkerPool(ctx context.Context, numWorkers int, batchSize int, timeout time.Duration, messages <-chan amqp.Delivery, handler BatchHandler) *sync.WaitGroup {
+// StartWorkerPool inicia o pipeline de alta performance com múltiplos collectors.
+//
+// Arquitetura:
+//   [RabbitMQ] ──→ [Collector-1 (canal próprio)] ─┐
+//   [RabbitMQ] ──→ [Collector-2 (canal próprio)] ──┼──→ [batchCh buffered] ──→ [50x Processors]
+//   [RabbitMQ] ──→ [Collector-N (canal próprio)] ─┘
+//
+// Cada collector tem seu próprio canal AMQP → sem serialização de rede.
+// Os processors processam lotes em paralelo chamando o handler real.
+func StartWorkerPool(
+	ctx context.Context,
+	numCollectors int,   // canais AMQP paralelos (era numWorkers - agora separado)
+	numProcessors int,   // goroutines de handler em paralelo
+	batchSize int,
+	timeout time.Duration,
+	channels []<-chan amqp.Delivery, // um chan por collector
+	handler BatchHandler,
+) *sync.WaitGroup {
 	var wg sync.WaitGroup
-	esteira := make(chan int, numWorkers*5) // Passamos apenas o tamanho do lote para o log
 
-	// 1. Logger de Alta Performance (Consumidor da Esteira)
-	// Centraliza os logs para não travar os workers de coleta
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for size := range esteira {
-			fmt.Printf("[%s] 🚀 LOTE PROCESSADO: %d mensagens consumidas.\n", time.Now().Format("15:04:05"), size)
-		}
-	}()
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
+	}
 
-	// 2. Workers de Coleta
-	for i := 1; i <= numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			batchCount := 0
-			// Ensure a positive interval for the ticker; fallback to 1s if mis‑configured
-			effectiveTimeout := timeout
-			if effectiveTimeout <= 0 {
-				effectiveTimeout = time.Second
-			}
-			ticker := time.NewTicker(effectiveTimeout)
+	// Canal de lotes — buffer generoso para não bloquear nenhum collector
+	batchCh := make(chan []amqp.Delivery, numProcessors*8)
+
+	// Contador atômico de mensagens processadas
+	var totalProcessed int64
+
+	// ── 1. COLLECTORS ────────────────────────────────────────────────────────────
+	// Uma goroutine por canal AMQP. Cada uma lê independentemente, sem lock.
+	var collectorWg sync.WaitGroup
+	for i, msgs := range channels {
+		collectorWg.Add(1)
+		go func(id int, messages <-chan amqp.Delivery) {
+			defer collectorWg.Done()
+
+			batch := make([]amqp.Delivery, 0, batchSize)
+			ticker := time.NewTicker(timeout)
 			defer ticker.Stop()
 
 			flush := func() {
-				if batchCount == 0 {
+				if len(batch) == 0 {
 					return
 				}
-				esteira <- batchCount // Joga o aviso na esteira
-				batchCount = 0
+				toSend := make([]amqp.Delivery, len(batch))
+				copy(toSend, batch)
+				select {
+				case batchCh <- toSend:
+				case <-ctx.Done():
+				}
+				batch = batch[:0]
 				ticker.Reset(timeout)
 			}
 
@@ -53,22 +73,51 @@ func StartWorkerPool(ctx context.Context, numWorkers int, batchSize int, timeout
 				case <-ctx.Done():
 					flush()
 					return
+
 				case msg, ok := <-messages:
 					if !ok {
 						flush()
 						return
 					}
-
-					// Confirmamos a mensagem imediatamente para esvaziar a fila
-					_ = msg.Ack(false)
-					batchCount++
-
-					if batchCount >= batchSize {
+					batch = append(batch, msg)
+					if len(batch) >= batchSize {
 						flush()
 					}
+
 				case <-ticker.C:
 					flush()
 				}
+			}
+		}(i+1, msgs)
+	}
+
+	// Fecha batchCh quando todos os collectors terminarem
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		collectorWg.Wait()
+		close(batchCh)
+	}()
+
+	// ── 2. PROCESSORS ────────────────────────────────────────────────────────────
+	// N goroutines independentes processam lotes em paralelo.
+	for i := 1; i <= numProcessors; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for batch := range batchCh {
+				// ACK múltiplo no último msg do lote (uma única roundtrip de rede!)
+				if len(batch) > 0 {
+					_ = batch[len(batch)-1].Ack(true) // multiple=true → ack todos anteriores
+				}
+
+				if err := handler(ctx, batch); err != nil {
+					fmt.Printf("[Processor %d] ⚠️  Erro no handler: %v\n", id, err)
+				}
+
+				n := atomic.AddInt64(&totalProcessed, int64(len(batch)))
+				fmt.Printf("[%s] ⚡ Processor %02d | Lote: %4d msgs | Total: %d\n",
+					time.Now().Format("15:04:05"), id, len(batch), n)
 			}
 		}(i)
 	}
