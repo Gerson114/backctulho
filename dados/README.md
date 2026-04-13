@@ -63,9 +63,23 @@ O pool de conexões é ajustado automaticamente para corresponder ao número de 
 
 ---
 
-## 🛠️ Deploy e Manutenção
+## ☁️ Deploy e Infraestrutura AWS (Produção Recomendada)
 
-### Graceful Shutdown (Encerramento Suave)
+Este serviço é um _worker_ silencioso focado exclusivamente no **background process**. Ele não sofre impacto direto de engasgos com muitos usuários ou conexões TCP web como a API sofre. O ritmo do Consumer é ditado pelo seu "Prefetch" da Fila.
+
+### 1. Configuração da Máquina Consumer (`Motor de Dados`)
+- **Máquina**: Amazon EC2 `t4g.micro` ou Container `ECS Fargate`.
+- **Tamanho Limite**: **2 vCPUs e 1GB de RAM**. O script em Go pesa raros megabytes, e 1GB é muito além do suficiente para empacotar fardos enormes de milhares de arrays sem transbordar memória antes de enviá-los ao Banco.
+- **Regras de Segurança de Rede (VPC)**: **Nenhum IP público!** A máquina deve estar cega para a internet externa e localizada em uma Sub-rede Privada. O seu limite de atuação é apenas conversar via rede privativa com o **Amazon MQ** para buscar a fila, e com o **Amazon Aurora PostgreSQL** para injetar as gravações.
+- **Tranquilidade Ociosa**: O `t4g.micro` no ecossistema AWS permite ganhos de burst de CPU momentâneos. Sob alto estresse constante, o Go usa bem as 2 vCPU paralelizadas e você dificilmente gastará centenas de reais hospedando o Consumer.
+
+### 2. O Gargalo e Motor Banco de Dados (PostgreSQL)
+A máquina ECS ou EC2 Micro anterior enjaula a carga incrivelmente bem, mas empurra a pressão atômica toda para o seu PostgreSQL rodar o motor interno. Se atente à base de dados na AWS:
+- **Tamanho AWS Aurora**: Utilize instâncias a partir de uma `db.t4g.medium` (2vCPU / 4GB RAM). Sem isso, ele pedirá água ao tentar salvar os lotes densos que o GORM consolida (asfixia de transações `createInBatches` ou sobrecarga por IOPS do EBS lento de bancos genéricos limitará sua performance total absurdamente).
+
+---
+
+### Graceful Shutdown (Encerramento Suave na AWS)
 O consumidor implementa uma estratégia de saída limpa. Quando recebe um sinal de término (`SIGTERM`):
 1. Os Coletores param de receber novas mensagens.
 2. O buffer interno é esvaziado e os lotes atuais são gravados no banco.
