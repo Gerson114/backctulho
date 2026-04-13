@@ -92,6 +92,25 @@ Em vez de abrir um canal AMQP para cada requisição, a API usa um pool pré-alo
 
 ---
 
+## ☁️ Arquitetura de Deploy Nativa AWS (Produção)
+
+Para garantir que a API suporte **5.000+ votos/segundo** sem engasgos, esta é a topologia recomendada focada 100% no ecossistema AWS:
+
+### 1. Computação (A API Go)
+Recomendamos o uso do **Amazon ECS com AWS Fargate** ou de múltiplas instâncias no **Amazon EC2**.
+- **Amazon EC2**: Instâncias da família *Compute Optimized* ou *Burstable* de nova geração (ex: `c6g.large` com processadores Graviton, ou `t3.medium`).
+- **Amazon ECS (Fargate)**: Se preferir focar apenas no código, empacote o Dockerfile e rode tasks Serverless. Alocação ideal: 2 vCPUs e 4GB RAM por task.
+- **Load Balancer**: A aplicação não deve receber tráfego direto. Coloque as instâncias/tasks atrás de um **Application Load Balancer (ALB)**. O ALB vai gerenciar os certificados SSL (gratuitos via AWS Certificate Manager) e vai entregar apenas tráfego HTTP limpo na porta `8080` para o backend em Go, reduzindo o custo computacional com criptografia.
+- **Auto Scaling**: Configure um Auto Scaling Group baseado no consumo de CPU (alvo: 60%). Como o Go inicia em poucos milissegundos, novas máquinas subirão instantaneamente sob alto estresse.
+
+### 2. Infraestrutura de Apoio (As Travas)
+Para sustentar 5.000 RPS, o disco e a CPU das máquinas EC2 de aplicação não podem concorrer com o Redis ou filas. Tudo deve ser fatiado:
+- **Cache Mestre (Redis)**: Use o **Amazon ElastiCache para Redis**. Crie o cluster na mesma sub-rede privada (VPC) e mesma Região (ex: `sa-east-1` - São Paulo) que a API. A latência entre a EC2 e o ElastiCache precisa ser consistentemente inferior a 1 milissegundo para o rate limit e a checagem global (`SETNX`) performarem.
+- **Mensageria (RabbitMQ)**: Utilize o **Amazon MQ for RabbitMQ**. Ele cuidará ativamente de espelhar as mensagens e garantir que não travem. Em picos absurdos, se o motor de banco de dados atrasar, o Amazon MQ vai segurar com segurança no disco SSD dele as mensagens até desafogar.
+- **Banco de Dados**: Com a API entregando ao Amazon MQ, a responsabilidade cai na máquina 'consumer' (`dados`), que deverá inserir os fardos (batching) em um **Amazon Aurora PostgreSQL**. O Aurora lidará tranquilamente com as transações em massa sob alta frequência de discos virtuais NVMe.
+
+---
+
 ## 🛠️ Desenvolvimento e Deploy
 
 ### Rodar Localmente (para testes)
