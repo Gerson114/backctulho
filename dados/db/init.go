@@ -14,8 +14,9 @@ import (
 func InitDB(dsn string) (*gorm.DB, error) {
     // High‑performance GORM configuration
     cfg := &gorm.Config{
-        Logger:      logger.Default.LogMode(logger.Silent), // silence per‑query logs
-        PrepareStmt: true,
+        Logger:                 logger.Default.LogMode(logger.Silent), // silence per‑query logs
+        PrepareStmt:            true,
+        SkipDefaultTransaction: true, // 🚀 TURBO: Remove o overhead de transações automáticas do GORM
     }
 
     db, err := gorm.Open(postgres.Open(dsn), cfg)

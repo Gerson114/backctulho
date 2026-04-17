@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,112 +13,147 @@ import (
 
 type BatchHandler func(ctx context.Context, batch []amqp.Delivery) error
 
-// StartWorkerPool inicia o pipeline de alta performance com múltiplos collectors.
+// StartWorkerPool inicia o pipeline de alta performance com agregação global (Funil).
 //
-// Arquitetura:
-//   [RabbitMQ] ──→ [Collector-1 (canal próprio)] ─┐
-//   [RabbitMQ] ──→ [Collector-2 (canal próprio)] ──┼──→ [batchCh buffered] ──→ [50x Processors]
-//   [RabbitMQ] ──→ [Collector-N (canal próprio)] ─┘
+// Arquitetura de Funil:
 //
-// Cada collector tem seu próprio canal AMQP → sem serialização de rede.
-// Os processors processam lotes em paralelo chamando o handler real.
+//	[RabbitMQ] ──→ [Collector-1] ─┐
+//	[RabbitMQ] ──→ [Collector-2] ──┼──→ [rawMsgsCh (Central)] ──→ [GLOBAL AGGREGATOR] ──→ [batchCh] ──→ [Processors]
+//	[RabbitMQ] ──→ [Collector-N] ─┘
+//
+// O Agregador Global garante que os lotes sejam sempre preenchidos ao máximo antes de ir para o banco.
 func StartWorkerPool(
 	ctx context.Context,
-	numCollectors int,   // canais AMQP paralelos (era numWorkers - agora separado)
-	numProcessors int,   // goroutines de handler em paralelo
+	numCollectors int,
+	numProcessors int,
 	batchSize int,
 	timeout time.Duration,
-	channels []<-chan amqp.Delivery, // um chan por collector
+	channels []<-chan amqp.Delivery,
 	handler BatchHandler,
 ) *sync.WaitGroup {
 	var wg sync.WaitGroup
 
 	if timeout <= 0 {
-		timeout = 100 * time.Millisecond
+		timeout = 1 * time.Second
 	}
 
-	// Canal de lotes — buffer generoso para não bloquear nenhum collector
-	batchCh := make(chan []amqp.Delivery, numProcessors*8)
+	// 1. Canal de Mensagens Brutas (O Funil Central)
+	rawMsgsCh := make(chan amqp.Delivery, batchSize*5)
 
-	// Contador atômico de mensagens processadas
+	// 2. Canal de Lote Pronto para os Processadores
+	batchCh := make(chan []amqp.Delivery, numProcessors*4)
+
+	// Contador atômico
 	var totalProcessed int64
 
-	// ── 1. COLLECTORS ────────────────────────────────────────────────────────────
-	// Uma goroutine por canal AMQP. Cada uma lê independentemente, sem lock.
+	// ── FASE 1: COLETORES ────────────────────────────────────────────────────────
+	// Apenas puxam do RabbitMQ e jogam no Funil Central
 	var collectorWg sync.WaitGroup
 	for i, msgs := range channels {
 		collectorWg.Add(1)
 		go func(id int, messages <-chan amqp.Delivery) {
 			defer collectorWg.Done()
-
-			batch := make([]amqp.Delivery, 0, batchSize)
-			ticker := time.NewTicker(timeout)
-			defer ticker.Stop()
-
-			flush := func() {
-				if len(batch) == 0 {
-					return
-				}
-				toSend := make([]amqp.Delivery, len(batch))
-				copy(toSend, batch)
-				select {
-				case batchCh <- toSend:
-				case <-ctx.Done():
-				}
-				batch = batch[:0]
-				ticker.Reset(timeout)
-			}
-
 			for {
 				select {
 				case <-ctx.Done():
-					flush()
 					return
-
 				case msg, ok := <-messages:
 					if !ok {
-						flush()
 						return
 					}
-					batch = append(batch, msg)
-					if len(batch) >= batchSize {
-						flush()
+					select {
+					case rawMsgsCh <- msg:
+					case <-ctx.Done():
+						return
 					}
-
-				case <-ticker.C:
-					flush()
 				}
 			}
 		}(i+1, msgs)
 	}
 
-	// Fecha batchCh quando todos os collectors terminarem
+	// ── FASE 2: AGREGADOR GLOBAL ──────────────────────────────────────────────
+	// O cérebro do sistema: junta tudo em lotes gigantes e eficientes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		collectorWg.Wait()
-		close(batchCh)
+		defer close(batchCh)
+
+		batch := make([]amqp.Delivery, 0, batchSize)
+		ticker := time.NewTicker(timeout)
+		defer ticker.Stop()
+
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			toSend := make([]amqp.Delivery, len(batch))
+			copy(toSend, batch)
+			select {
+			case batchCh <- toSend:
+			case <-ctx.Done():
+			}
+			batch = batch[:0]
+			ticker.Reset(timeout)
+		}
+
+		// Fecha quando todos os coletores pararem
+		collectorsDone := make(chan struct{})
+		go func() {
+			collectorWg.Wait()
+			log.Println("[SISTEMA] 🛑 Coletores pararam. Fechando canal de mensagens brutas...")
+			close(rawMsgsCh)
+			close(collectorsDone)
+		}()
+
+		idleTicker := time.NewTicker(10 * time.Second)
+		defer idleTicker.Stop()
+
+		for {
+			select {
+			case msg, ok := <-rawMsgsCh:
+				if !ok {
+					flush()
+					log.Println("[SISTEMA] 🏁 Agregador Global finalizado.")
+					return
+				}
+				batch = append(batch, msg)
+				if len(batch) >= batchSize {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			case <-idleTicker.C:
+				if len(batch) == 0 {
+					log.Println("[SISTEMA] 💤 Aguardando novos votos do RabbitMQ...")
+				}
+			case <-ctx.Done():
+				flush()
+				return
+			}
+		}
 	}()
 
-	// ── 2. PROCESSORS ────────────────────────────────────────────────────────────
-	// N goroutines independentes processam lotes em paralelo.
+	// ── FASE 3: PROCESSADORES ──────────────────────────────────────────────────
+	// Multitasking de gravação no banco
 	for i := 1; i <= numProcessors; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for batch := range batchCh {
-				// ACK múltiplo no último msg do lote (uma única roundtrip de rede!)
-				if len(batch) > 0 {
-					_ = batch[len(batch)-1].Ack(true) // multiple=true → ack todos anteriores
+			for batch_data := range batchCh {
+				// 1. Processa a carga no banco
+				if err := handler(ctx, batch_data); err != nil {
+					fmt.Printf("[Processor %d] ⚠️  Erro: %v\n", id, err)
+					continue // Não dá ACK se falhar brutalmente
 				}
 
-				if err := handler(ctx, batch); err != nil {
-					fmt.Printf("[Processor %d] ⚠️  Erro no handler: %v\n", id, err)
+				// 2. ACK múltiplo no último msg do lote (Só após sucesso no banco)
+				if len(batch_data) > 0 {
+					_ = batch_data[len(batch_data)-1].Ack(true)
 				}
 
-				n := atomic.AddInt64(&totalProcessed, int64(len(batch)))
+				n := atomic.AddInt64(&totalProcessed, int64(len(batch_data)))
 				fmt.Printf("[%s] ⚡ Processor %02d | Lote: %4d msgs | Total: %d\n",
-					time.Now().Format("15:04:05"), id, len(batch), n)
+					time.Now().Format("15:04:05"), id, len(batch_data), n)
 			}
 		}(i)
 	}
