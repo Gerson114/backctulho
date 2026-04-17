@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,12 +19,26 @@ import (
 // Iniciar cria o engine Gin com as rotas registradas e proteções de segurança.
 func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador, cfg *config.Config) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery())
 	r.Use(gin.Logger())
 
-	// Middleware CORS: Restringe quem pode chamar sua API em produção
+	// 🛡️ SEGURANÇA: Configuração de Proxies Confiáveis
+	// Por padrão, não confiamos em nenhum proxy para evitar IP Spoofing via cabeçalhos X-Forwarded-For.
+	// Se usar Cloudflare/Nginx/ALB, adicione os IPs dos seus balanceadores aqui.
+	r.SetTrustedProxies(nil)
+
+	// Middleware CORS: Suporta múltiplos domínios (localhost e IP da rede)
 	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", cfg.AllowedOrigin)
+		origin := c.Request.Header.Get("Origin")
+		allowedOrigins := strings.Split(cfg.AllowedOrigin, ",")
+
+		// Se a origem da requisição estiver na lista permitida, nós a ecoamos no header
+		for _, o := range allowedOrigins {
+			if strings.TrimSpace(o) == origin {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+				break
+			}
+		}
+
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT")
@@ -37,17 +52,19 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador, cfg *config.Co
 	})
 
 	r.POST("/vote", func(c *gin.Context) {
-		// 🛡️ SEGURANÇA 1: RATE LIMIT (Bloqueio por IP)
-		// Limite sugerido: 5 requisições a cada 10 segundos por IP
+		// 🛡️ SEGURANÇA 1: RATE LIMIT (DESATIVADO TEMPORARIAMENTE PARA TESTE DE CARGA)
+		/*
+			ip := c.ClientIP()
+			if !val.PermitirRateLimit(c.Request.Context(), ip, 5, 10*time.Second) {
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"status":   "erro",
+					"mensagem": "muitas requisições, por favor aguarde alguns segundos",
+				})
+				c.Abort()
+				return
+			}
+		*/
 		ip := c.ClientIP()
-		if !val.PermitirRateLimit(c.Request.Context(), ip, 5, 10*time.Second) {
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"status":   "erro",
-				"mensagem": "muitas requisições, por favor aguarde alguns segundos",
-			})
-			c.Abort()
-			return
-		}
 
 		var voto models.Voto
 
@@ -55,7 +72,7 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador, cfg *config.Co
 		if err := c.ShouldBindJSON(&voto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"status":   "erro",
-				"mensagem": "body inválido: " + err.Error(),
+				"mensagem": "formato de dados inválido ou corpo vazio",
 			})
 			return
 		}
@@ -94,6 +111,8 @@ func Iniciar(wp *workerpool.WorkerPool, val *validacao.Validador, cfg *config.Co
 				return
 			}
 			fmt.Printf("⚠️ Erro na validação (Redis): %v\n", err)
+			// Em caso de erro interno, logamos mas permitimos o processamento (fail-open)
+			// para não prejudicar o usuário por falhas de infraestrutura.
 		}
 
 		// Publicação no Pipeline

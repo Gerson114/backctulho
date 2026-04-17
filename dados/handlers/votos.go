@@ -6,6 +6,7 @@ import (
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"nome-do-projeto/db"
 	"nome-do-projeto/models"
 )
 
@@ -21,11 +22,13 @@ func ProcessVoteBatch(ctx context.Context, batch []amqp.Delivery) error {
 		votos = append(votos, v)
 	}
 
-	if len(votos) == 0 {
-		log.Println("[handlers] lote vazio, nada a registrar.")
-		return nil
+	// 🚀 PERSISTÊNCIA EM LOTE (Alta Performance)
+	// CreateInBatches divide os 2000 votos em pedaços de 500 para o Postgres
+	if err := db.Instance.CreateInBatches(votos, 500).Error; err != nil {
+		log.Printf("[handlers] ❌ Erro ao salvar lote no banco: %v", err)
+		return err
 	}
 
-	log.Printf("[handlers] lote de %d votos recebido. Primeiro voto: %+v", len(votos), votos[0])
+	log.Printf("[handlers] ✅ Sucesso: Lote de %d votos persistido no Postgres.", len(votos))
 	return nil
 }

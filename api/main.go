@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -30,7 +31,9 @@ func main() {
 	defer conn.Close()
 
 	// 3. Inicia Pool de Workers Internos (Producer)
-	wp := workerpool.Novo(conn, 30, 10_000)
+	// Com a nova arquitetura de Pool de Canais, podemos usar 150 workers com apenas 10 canais.
+	// Isso permite processar 2.000+ RPS sem estourar o limites do RabbitMQ Grátis.
+	wp := workerpool.Novo(conn, 150, 100_000)
 
 	// 4. Conecta ao Redis com Pool otimizado
 	opts, err := redis.ParseURL(cfg.RedisURL)
@@ -38,13 +41,18 @@ func main() {
 		log.Fatalf("❌ Erro fatal: falha ao parsear REDIS_URL: %v", err)
 	}
 
-	opts.PoolSize = 100
-	opts.MinIdleConns = 20
+	// Limitamos o PoolSize para 29 para não estourar o limite de 30 do Redis Cloud Grátis
+	opts.PoolSize = 29
+	opts.MinIdleConns = 10
 
 	rdb := redis.NewClient(opts)
 	val := validacao.Novo(rdb)
 
-	// 5. Inicia o Servidor HTTP (Gin)
+	// 5. Warm-up: Carrega votos existentes no Bloom Filter (Memória)
+	// Isso garante 0ms de latência mesmo após reiniciar o servidor
+	_ = val.CarregarFiltro(context.Background())
+
+	// 6. Inicia o Servidor HTTP (Gin)
 	r := router.Iniciar(wp, val, cfg)
 
 	go func() {

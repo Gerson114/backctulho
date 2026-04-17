@@ -8,6 +8,6 @@ type Voto struct {
 	Nome         string    `json:"nome"`
 	Numero       int       `json:"numero"`
 	EmendaVotada string    `json:"emenda_votada"`
-	VotadoEm     time.Time `json:"votado_em"` // timestamp do momento do voto
-	IPOrigem     string    `json:"ip_origem"` // rastreabilidade
+	VotadoEm     time.Time `json:"-"` // timestamp interno do momento do voto
+	IPOrigem     string    `json:"-"` // rastreabilidade interna
 }

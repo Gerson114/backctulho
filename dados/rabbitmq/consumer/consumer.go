@@ -19,6 +19,7 @@ func StartConsumer(
 	ctx context.Context,
 	conn *amqp.Connection,
 	queueName string,
+	exchangeName string,
 	prefetchCount int,
 	numCollectors int, // canais AMQP paralelos
 	numProcessors int, // goroutines de handler
@@ -36,10 +37,22 @@ func StartConsumer(
 			return nil, fmt.Errorf("canal %d: %w", i, err)
 		}
 
-		// Declara a fila em cada canal (idempotente)
+		// 1. Declara a fila em cada canal (idempotente)
 		q, err := ch.QueueDeclare(queueName, true, false, false, false, nil)
 		if err != nil {
 			return nil, fmt.Errorf("canal %d: declare queue: %w", i, err)
+		}
+
+		// 2. Declara o exchange (fanout) para garantir que ele existe
+		err = ch.ExchangeDeclare(exchangeName, "fanout", true, false, false, false, nil)
+		if err != nil {
+			return nil, fmt.Errorf("canal %d: declare exchange: %w", i, err)
+		}
+
+		// 3. Vincula a fila ao exchange (Binding)
+		err = ch.QueueBind(q.Name, "", exchangeName, false, nil)
+		if err != nil {
+			return nil, fmt.Errorf("canal %d: bind queue: %w", i, err)
 		}
 
 		// QoS por canal — cada canal pré-busca até prefetchCount msgs

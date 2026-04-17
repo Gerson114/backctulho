@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -16,8 +17,9 @@ type AppConfig struct {
 	NumProcessors int
 	BatchSize     int
 	Timeout       time.Duration
-	DBDSName      string
+	PostgresDSN   string
 	PrefetchCount int
+	ExchangeName  string
 }
 
 func LoadConfig() AppConfig {
@@ -37,14 +39,15 @@ func LoadConfig() AppConfig {
 		BatchSize:     getEnvAsInt("BATCH_SIZE", 1000),
 		Timeout:       getEnvAsDuration("BATCH_TIMEOUT", 200*time.Millisecond),
 		PrefetchCount: getEnvAsInt("PREFETCH_COUNT", 10000),
-		DBDSName:      getEnv("POSTGRES_DSN", ""),
+		PostgresDSN:   getEnv("POSTGRES_DSN", ""),
+		ExchangeName:  getEnv("EXCHANGE_NAME", "votos_exchange"),
 	}
 
 	// Validação de Produção
 	if cfg.RabbitURL == "" {
 		log.Fatal("❌ ERRO: RABBITMQ_URL de produção não definida nos dados.")
 	}
-	if cfg.DBDSName == "" {
+	if cfg.PostgresDSN == "" {
 		log.Fatal("❌ ERRO: POSTGRES_DSN de produção não definida nos dados.")
 	}
 
@@ -53,7 +56,7 @@ func LoadConfig() AppConfig {
 
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok && value != "" {
-		return value
+		return strings.TrimSpace(value)
 	}
 	return fallback
 }

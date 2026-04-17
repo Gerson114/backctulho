@@ -9,13 +9,27 @@ import (
 	"time"
 
 	"nome-do-projeto/config"
+	"nome-do-projeto/db"
 	"nome-do-projeto/handlers"
+	"nome-do-projeto/models"
 	"nome-do-projeto/rabbitmq/connect"
 	"nome-do-projeto/rabbitmq/consumer"
 )
 
 // Run inicia o ciclo de vida completo da aplicação de consumo.
 func Run(cfg config.AppConfig) error {
+	// 0. Inicializa Banco de Dados
+	log.Println("[App] Conectando ao Postgres...")
+	database, err := db.InitDB(cfg.PostgresDSN)
+	if err != nil {
+		return err
+	}
+	
+	// Migração Automática (Cria a tabela se não existir)
+	if err := database.AutoMigrate(&models.Voto{}); err != nil {
+		log.Printf("[App] Erro na migração: %v", err)
+	}
+
 	// 1. Contexto com Graceful Shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -34,6 +48,7 @@ func Run(cfg config.AppConfig) error {
 		ctx,
 		conn,
 		cfg.QueueName,
+		cfg.ExchangeName,
 		cfg.PrefetchCount,
 		cfg.NumCollectors,
 		cfg.NumProcessors,

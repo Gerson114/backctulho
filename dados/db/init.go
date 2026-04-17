@@ -30,9 +30,13 @@ func InitDB(dsn string) (*gorm.DB, error) {
 
     // Connection pool settings (tuned for workers)
     sqlDB.SetMaxOpenConns(100)
-    sqlDB.SetMaxIdleConns(10)
+    sqlDB.SetMaxIdleConns(50)
     sqlDB.SetConnMaxLifetime(time.Hour)
 
+    Instance = db
     log.Println("[DB] Pool de conexões Postgres inicializado.")
     return db, nil
 }
+
+// Instance é a instância global do GORM para ser usada pelos handlers
+var Instance *gorm.DB
